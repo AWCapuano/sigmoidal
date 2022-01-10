@@ -1,0 +1,117 @@
+
+******************************************************************************************************
+MACRO SIGMOIDAL
+
+dt= dataset, 
+t=time from death,  
+id= participant id, 
+y=outcome, 
+ref_time= reference time for change in trajectory(i.e. cognition 3 years before death)
+**for the graph**
+la= first value for predictor to be used in the graph (recommended Q1, first quartile)
+lb= second value for predictor to be used in the graph (recommended Q3, last quartile) 
+plot_max_time= max time in the graph (recommended Q3 length of follow-up)
+
+Created: 1/10/2022 Ana W Capuano
+Reference: Capuano AW, Wilson RS, Leurgans SE, Dawson JD, Bennett DA, Hedeker D. 
+Sigmoidal mixed models for longitudinal data. 
+Stat Methods Med Res. 2018 Mar;27(3):863-875. 
+doi: 10.1177/0962280216645632. Epub 2016 Apr 28. PMID: 27130491; PMCID: PMC5503801.
+*****************************************************************************************************;
+
+%macro sigmoidal (dt,t, id,y,ref_time,pred,la,lb,plot_max_time);
+proc univariate data=&dt. (where =( &t.<0.5)) noprint; var &y. ; output out=m mean= mean_death; run;
+data _null_;    set m ; 
+      call symput (compress("initial_theta1") ,mean_death); 
+      call symput (compress("initial_ theta4") ,-(mean_death/2));
+run;
+proc mixed data=&dt. (where=( &t.< &ref_time.)) 
+   method=reml covtest noclprint ratio maxfunc=250 maxiter=100 namelen=50 ;  
+      class &id. ;       model &y.= &t./s outp=pred covb ddfm=bw cl;      
+      random intercept &t./type=un subject=&id.  g gcorr;      
+      ods output  SolutionF=fl;   
+run; quit;
+proc mixed data=&dt. (where=(&t.> &ref_time.)) 
+   method=reml covtest noclprint ratio maxfunc=250 maxiter=100 namelen=50 ;        
+      class &id. ;      model &y.= &t./s outp=pred covb ddfm=bw cl;      
+      random intercept &t./type=un subject=&id.  g gcorr;      
+      ods output  SolutionF=fh;   
+run; quit;  
+data _null_; 
+   merge fl(where=(effect ="&t.") rename=(estimate=low)) fh (where=(effect ="&t.") rename=(estimate=high)) ; 
+   by effect;      
+      if 0.5<abs(low/high)<1.5 then theta3_val=1.05; else theta3_val =0.5;      
+      if 0.5<abs(low/high)<1.5 then theta2_val=30; else theta2_val=2;      
+      call symput (compress("initial_theta3") , theta3_val);      
+      call symput (compress("initial_theta2") , theta2_val);   
+run;
+%let theta1_core=(theta1+u1   	+(pred_theta1*&pred.));
+%let theta2_core=(theta2   	+(pred_theta2*&pred.));
+%let theta3_core=(theta3   	+(pred_theta3*&pred.));
+%let theta4_core=(theta4+u2   	+(pred_theta4*&pred.));
+proc nlmixed data=&dt. cov; 
+  parms theta1   &initial_theta1. 
+	theta2   &initial_theta2. 
+	theta3   &initial_theta3. 
+	theta4   &initial_theta4. 
+	pred_theta1  	0 
+	pred_theta2  	0 
+	pred_theta3   	0 
+	pred_theta4   	0 
+        var_e	0.25          var1	1.5          var2	0.5          cv  -0.5;
+   bounds  var_e >0, var1>0, var2>0;
+   if &t.= 0 then mu = &theta1_core. +u1; 
+      else mu = (&theta4_core.+u2) + ((&theta1_core.+u1)-(&theta4_core.+u2))
+	/((1 + exp((&theta3_core.)*(log(&t.)-log(&theta2_core.)))));
+      model &y. ~ normal( mu , var_e);  random u1 u2 ~ normal([0,0], [var1, cv, var2])  subject = &id. ;
+      ods output  parameterestimates=f_0 ;
+run;
+	data ff_0; set f_0; 
+		keep parameter estimate;
+	run;
+	proc sort data=ff_0;	by Parameter; run;
+	proc transpose data=ff_0 
+		out=fff_0
+		name=estimate;
+		id Parameter;
+	run;
+ 	data  fff_01;
+		set  fff_0;
+		theta2la=theta2+(pred_theta2*&la.);
+		theta2lb=theta2+(pred_theta2*&lb.);
+      		call symput (compress("theta2la_val") , theta2la ); 
+      		call symput (compress("theta2lb_val") , theta2lb ); 
+	run;  
+	data long_base_0;
+	  set fff_0;
+            do j=0 to &plot_max_time. by 0.1;
+               &t. = j;
+				if &t. = 0 then mu1 = theta1+(pred_theta1*&la.);
+	   			else mu1 = (theta4+(pred_theta4*&la.)) + 
+					  ((theta1+(pred_theta1*&la.))-
+					  (theta4+(pred_theta4*&la.)))
+					  /((1 + exp((theta3+(pred_theta3*&la.))*(log(&t.)-
+					  log(theta2+(pred_theta2*&la.))))));
+				if &t. = 0 then mu2 = theta1+(pred_theta1*&lb.);
+	   			else mu2 = (theta4+(pred_theta4*&lb.)) + 
+					  ((theta1+(pred_theta1*&lb.))-
+					  (theta4+(pred_theta4*&lb.)))
+					  /((1 + exp((theta3+(pred_theta3*&lb.))*(log(&t.)-
+					  log(theta2+(pred_theta2*&lb.))))));
+               output;
+            end;
+       run;
+ods pdf;
+Title "Sigmoidal Model";
+options orientation=landscape;
+proc print data=f_0 noobs;var Parameter Estimate StandardError DF tValue Probt Alpha; run;
+proc sgplot data=long_base_0 ;
+  series  x=&t.  y=mu1 / LEGENDLABEL ="&pred. at level &la." LINEATTRS = (THICKNESS = 4 color=black); 
+  series  x=&t.  y=mu2 / LEGENDLABEL ="&pred. at level &lb." LINEATTRS = (THICKNESS = 4 color=orange); 
+	XAXIS label= "&t." ;
+	YAXIS label="&y." ;             
+	REFLINE  &theta2la_val. /   axis=x LINEATTRS = (color=black pattern=dot THICKNESS = 2);
+	REFLINE  &theta2lb_val.  /   axis=x LINEATTRS = (color=orange pattern=dot THICKNESS = 2 );
+run;
+ods pdf close;
+%mend sigmoidal;  
